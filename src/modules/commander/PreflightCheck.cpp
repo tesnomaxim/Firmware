@@ -611,25 +611,6 @@ bool preflightCheck(orb_advert_t *mavlink_log_pub, vehicle_status_s &status,
 
 	reportFailures = (reportFailures && status_flags.condition_system_hotplug_timeout && !status_flags.condition_calibration_enabled);
 
-#ifdef __PX4_QURT
-	// WARNING: Preflight checks are important and should be added back when
-	// all the sensors are supported
-	PX4_WARN("Preflight checks always pass on Snapdragon.");
-	checkSensors = false;
-#elif defined(__PX4_POSIX_RPI)
-	PX4_WARN("Preflight checks for mag, acc, gyro always pass on RPI");
-	checkSensors = false;
-#elif defined(__PX4_POSIX_BBBLUE)
-	PX4_WARN("Preflight checks for mag, acc, gyro always pass on BBBLUE");
-	checkSensors = false;
-#elif defined(__PX4_POSIX_BEBOP)
-	PX4_WARN("Preflight checks always pass on Bebop.");
-	checkSensors = false;
-#elif defined(__PX4_POSIX_OCPOC)
-	PX4_WARN("Preflight checks always pass on OcPoC.");
-	checkSensors = false;
-#endif
-
 	bool failed = false;
 
 	/* ---- MAG ---- */

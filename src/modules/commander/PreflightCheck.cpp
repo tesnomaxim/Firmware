@@ -40,43 +40,34 @@
 * @author Johan Jansen <jnsn.johan@gmail.com>
 */
 
-#include <px4_config.h>
-#include <px4_posix.h>
-
-#include <parameters/param.h>
-#include <systemlib/mavlink_log.h>
-
-#include <drivers/drv_hrt.h>
-#include <drivers/drv_mag.h>
-#include <drivers/drv_gyro.h>
-#include <drivers/drv_accel.h>
-#include <drivers/drv_baro.h>
-#include <drivers/drv_airspeed.h>
-
-#include <uORB/topics/airspeed.h>
-#include <uORB/topics/differential_pressure.h>
-#include <uORB/topics/estimator_status.h>
-#include <uORB/topics/sensor_preflight.h>
-#include <uORB/topics/system_power.h>
-#include <uORB/topics/vehicle_gps_position.h>
-#include <uORB/topics/subsystem_info.h>
-
 #include "PreflightCheck.h"
 #include "health_flag_helper.h"
 #include "rc_check.h"
 
-#include "DevMgr.hpp"
+#include <parameters/param.h>
+#include <px4_config.h>
+#include <px4_posix.h>
+#include <systemlib/mavlink_log.h>
+#include <uORB/Subscription.hpp>
+#include <uORB/topics/airspeed.h>
+#include <uORB/topics/differential_pressure.h>
+#include <uORB/topics/estimator_status.h>
+#include <uORB/topics/sensor_accel.h>
+#include <uORB/topics/sensor_baro.h>
+#include <uORB/topics/sensor_gyro.h>
+#include <uORB/topics/sensor_mag.h>
+#include <uORB/topics/sensor_preflight.h>
+#include <uORB/topics/subsystem_info.h>
+#include <uORB/topics/system_power.h>
 
-using namespace DriverFramework;
+using namespace time_literals;
 
 namespace Preflight
 {
 
-static int check_calibration(DevHandle &h, const char *param_template, int &devid)
+static bool check_calibration(const char *param_template, int32_t device_id)
 {
 	bool calibration_found = false;
-
-	devid = h.ioctl(DEVIOCGDEVICEID, 0);
 
 	char s[20];
 	int instance = 0;
@@ -84,7 +75,7 @@ static int check_calibration(DevHandle &h, const char *param_template, int &devi
 	/* old style transition: check param values */
 	while (!calibration_found) {
 		sprintf(s, param_template, instance);
-		param_t parm = param_find(s);
+		param_t parm = param_find_no_notification(s);
 
 		/* if the calibration param is not present, abort */
 		if (parm == PARAM_INVALID) {
@@ -92,12 +83,12 @@ static int check_calibration(DevHandle &h, const char *param_template, int &devi
 		}
 
 		/* if param get succeeds */
-		int32_t calibration_devid;
+		int32_t calibration_devid = 0;
 
-		if (!param_get(parm, &(calibration_devid))) {
+		if (param_get(parm, &(calibration_devid)) == PX4_OK) {
 
 			/* if the devid matches, exit early */
-			if (devid == calibration_devid) {
+			if (device_id == calibration_devid) {
 				calibration_found = true;
 				break;
 			}
@@ -106,47 +97,40 @@ static int check_calibration(DevHandle &h, const char *param_template, int &devi
 		instance++;
 	}
 
-	return !calibration_found;
+	return calibration_found;
 }
 
 static bool magnometerCheck(orb_advert_t *mavlink_log_pub, vehicle_status_s &status, unsigned instance, bool optional, int &device_id, bool report_fail)
 {
-	bool present = true;
-	bool success = true;
-	int ret = 0;
+	const bool exists = (orb_exists(ORB_ID(sensor_mag), instance) == PX4_OK);
+	bool calibration_valid = false;
+	bool mag_valid = false;
 
-	char s[30];
-	sprintf(s, "%s%u", MAG_BASE_DEVICE_PATH, instance);
-	DevHandle h;
-	DevMgr::getHandle(s, h);
+	if (exists) {
 
-	if (!h.isValid()) {
-		if (!optional) {
+		uORB::Subscription<sensor_mag_s> magnetometer{ORB_ID(sensor_mag), instance};
+		mag_valid = (hrt_elapsed_time(&magnetometer.get().timestamp) < 1_s);
+
+		device_id =  magnetometer.get().device_id;
+
+		calibration_valid = check_calibration("CAL_MAG%u_ID", device_id);
+
+		if (!calibration_valid) {
 			if (report_fail) {
-				mavlink_log_critical(mavlink_log_pub, "PREFLIGHT FAIL: NO MAG SENSOR #%u", instance);
+				mavlink_log_critical(mavlink_log_pub, "PREFLIGHT FAIL: MAG #%u UNCALIBRATED", instance);
 			}
 		}
-		present = false;
-		success = false;
-		goto out;
-	}
-
-	ret = check_calibration(h, "CAL_MAG%u_ID", device_id);
-
-	if (ret) {
-		if (report_fail) {
-			mavlink_log_critical(mavlink_log_pub, "PREFLIGHT FAIL: MAG #%u UNCALIBRATED", instance);
+	} else {
+		if (!optional && report_fail) {
+			mavlink_log_critical(mavlink_log_pub, "PREFLIGHT FAIL: NO MAG SENSOR #%u", instance);
 		}
-
-		success = false;
-		goto out;
 	}
 
-out:
-	if (instance==0) set_health_flags(subsystem_info_s::SUBSYSTEM_TYPE_MAG, present, !optional, success, status);
-	if (instance==1) set_health_flags(subsystem_info_s::SUBSYSTEM_TYPE_MAG2, present, !optional, success, status);
+	const bool success = calibration_valid && mag_valid;
 
-	DevMgr::releaseHandle(h);
+	if (instance==0) set_health_flags(subsystem_info_s::SUBSYSTEM_TYPE_MAG, exists, !optional, success, status);
+	if (instance==1) set_health_flags(subsystem_info_s::SUBSYSTEM_TYPE_MAG2, exists, !optional, success, status);
+
 	return success;
 }
 
@@ -239,154 +223,104 @@ static bool magConsistencyCheck(orb_advert_t *mavlink_log_pub, vehicle_status_s 
 
 static bool accelerometerCheck(orb_advert_t *mavlink_log_pub, vehicle_status_s &status, unsigned instance, bool optional, bool dynamic, int &device_id, bool report_fail)
 {
-	bool present = true;
-	bool success = true;
-	int ret = 0;
+	const bool exists = (orb_exists(ORB_ID(sensor_accel), instance) == PX4_OK);
+	bool calibration_valid = false;
+	bool accel_valid = true;
 
-	char s[30];
-	sprintf(s, "%s%u", ACCEL_BASE_DEVICE_PATH, instance);
-	DevHandle h;
-	DevMgr::getHandle(s, h);
+	if (exists) {
 
-	if (!h.isValid()) {
-		if (!optional) {
+		uORB::Subscription<sensor_accel_s> accel{ORB_ID(sensor_accel), instance};
+		accel_valid = (hrt_elapsed_time(&accel.get().timestamp) < 1_s);
+
+		device_id = accel.get().device_id;
+
+		calibration_valid = check_calibration("CAL_ACC%u_ID", device_id);
+
+		if (!calibration_valid) {
 			if (report_fail) {
-				mavlink_log_critical(mavlink_log_pub, "PREFLIGHT FAIL: NO ACCEL SENSOR #%u", instance);
-			}
-		}
-		present = false;
-		success = false;
-		goto out;
-	}
-
-	ret = check_calibration(h, "CAL_ACC%u_ID", device_id);
-
-	if (ret) {
-		if (report_fail) {
-			mavlink_log_critical(mavlink_log_pub, "PREFLIGHT FAIL: ACCEL #%u UNCALIBRATED", instance);
-		}
-
-		success = false;
-		goto out;
-	}
-
-#ifdef __PX4_NUTTX
-
-	if (dynamic) {
-		/* check measurement result range */
-		struct accel_report acc;
-		ret = h.read(&acc, sizeof(acc));
-
-		if (ret == sizeof(acc)) {
-			/* evaluate values */
-			float accel_magnitude = sqrtf(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z);
-
-			if (accel_magnitude < 4.0f || accel_magnitude > 15.0f /* m/s^2 */) {
-				if (report_fail) {
-					mavlink_log_critical(mavlink_log_pub, "PREFLIGHT FAIL: ACCEL RANGE, hold still on arming");
-				}
-
-				/* this is frickin' fatal */
-				success = false;
-				goto out;
+				mavlink_log_critical(mavlink_log_pub, "PREFLIGHT FAIL: ACCEL #%u UNCALIBRATED", instance);
 			}
 
 		} else {
-			if (report_fail) {
-				mavlink_log_critical(mavlink_log_pub, "PREFLIGHT FAIL: ACCEL READ");
-			}
 
-			/* this is frickin' fatal */
-			success = false;
-			goto out;
+			if (dynamic) {
+				const float accel_magnitude = sqrtf(accel.get().x * accel.get().x
+								    + accel.get().y * accel.get().y
+								    + accel.get().z * accel.get().z);
+
+				if (accel_magnitude < 4.0f || accel_magnitude > 15.0f /* m/s^2 */) {
+					if (report_fail) {
+						mavlink_log_critical(mavlink_log_pub, "PREFLIGHT FAIL: ACCEL RANGE, hold still on arming");
+					}
+
+					/* this is frickin' fatal */
+					accel_valid = false;
+				}
+			}
+		}
+	} else {
+		if (!optional && report_fail) {
+			mavlink_log_critical(mavlink_log_pub, "PREFLIGHT FAIL: NO ACCEL SENSOR #%u", instance);
 		}
 	}
 
-#endif
+	const bool success = calibration_valid && accel_valid;
 
-out:
-	if (instance==0) set_health_flags(subsystem_info_s::SUBSYSTEM_TYPE_ACC, present, !optional, success, status);
-	if (instance==1) set_health_flags(subsystem_info_s::SUBSYSTEM_TYPE_ACC2, present, !optional, success, status);
+	if (instance==0) set_health_flags(subsystem_info_s::SUBSYSTEM_TYPE_ACC, exists, !optional, success, status);
+	if (instance==1) set_health_flags(subsystem_info_s::SUBSYSTEM_TYPE_ACC2, exists, !optional, success, status);
 
-	DevMgr::releaseHandle(h);
 	return success;
 }
 
 static bool gyroCheck(orb_advert_t *mavlink_log_pub, vehicle_status_s &status, unsigned instance, bool optional, int &device_id, bool report_fail)
 {
-	bool present = true;
-	bool success = true;
-	int ret = 0;
+	const bool exists = (orb_exists(ORB_ID(sensor_gyro), instance) == PX4_OK);
+	bool calibration_valid = false;
+	bool gyro_valid = false;
 
-	char s[30];
-	sprintf(s, "%s%u", GYRO_BASE_DEVICE_PATH, instance);
-	DevHandle h;
-	DevMgr::getHandle(s, h);
+	if (exists) {
 
-	if (!h.isValid()) {
-		if (!optional) {
+		uORB::Subscription<sensor_gyro_s> gyro{ORB_ID(sensor_gyro), instance};
+		gyro_valid = (hrt_elapsed_time(&gyro.get().timestamp) < 1_s);
+
+		device_id =  gyro.get().device_id;
+
+		calibration_valid = check_calibration("CAL_GYRO%u_ID", device_id);
+
+		if (!calibration_valid) {
 			if (report_fail) {
-				mavlink_log_critical(mavlink_log_pub, "PREFLIGHT FAIL: NO GYRO SENSOR #%u", instance);
+				mavlink_log_critical(mavlink_log_pub, "PREFLIGHT FAIL: GYRO #%u UNCALIBRATED", instance);
 			}
 		}
-		present = false;
-		success = false;
-		goto out;
-	}
-
-	ret = check_calibration(h, "CAL_GYRO%u_ID", device_id);
-
-	if (ret) {
-		if (report_fail) {
-			mavlink_log_critical(mavlink_log_pub, "PREFLIGHT FAIL: GYRO #%u UNCALIBRATED", instance);
+	} else {
+		if (!optional && report_fail) {
+			mavlink_log_critical(mavlink_log_pub, "PREFLIGHT FAIL: NO GYRO SENSOR #%u", instance);
 		}
-
-		success = false;
-		goto out;
 	}
 
-out:
-	if (instance==0) set_health_flags(subsystem_info_s::SUBSYSTEM_TYPE_GYRO, present, !optional, success, status);
-	if (instance==1) set_health_flags(subsystem_info_s::SUBSYSTEM_TYPE_GYRO2, present, !optional, success, status);
+	if (instance==0) set_health_flags(subsystem_info_s::SUBSYSTEM_TYPE_GYRO, exists, !optional, calibration_valid && gyro_valid, status);
+	if (instance==1) set_health_flags(subsystem_info_s::SUBSYSTEM_TYPE_GYRO2, exists, !optional, calibration_valid && gyro_valid, status);
 
-	DevMgr::releaseHandle(h);
-	return success;
+	return calibration_valid && gyro_valid;
 }
 
 static bool baroCheck(orb_advert_t *mavlink_log_pub, vehicle_status_s &status, unsigned instance, bool optional, int &device_id, bool report_fail)
 {
-	bool success = true;
+	const bool exists = (orb_exists(ORB_ID(sensor_baro), instance) == PX4_OK);
+	bool baro_valid = false;
 
-	char s[30];
-	sprintf(s, "%s%u", BARO_BASE_DEVICE_PATH, instance);
-	DevHandle h;
-	DevMgr::getHandle(s, h);
-
-	if (!h.isValid()) {
-		if (!optional) {
-			if (report_fail) {
-				mavlink_log_critical(mavlink_log_pub, "PREFLIGHT FAIL: NO BARO SENSOR #%u", instance);
-			}
+	if (exists) {
+		uORB::Subscription<sensor_baro_s> baro{ORB_ID(sensor_baro), instance};
+		baro_valid = (hrt_elapsed_time(&baro.get().timestamp) < 1_s);
+	} else {
+		if (!optional && report_fail) {
+			mavlink_log_critical(mavlink_log_pub, "PREFLIGHT FAIL: NO BARO SENSOR #%u", instance);
 		}
-		set_health_flags(subsystem_info_s::SUBSYSTEM_TYPE_ABSPRESSURE, false, !optional, false, status);
-		return false;
 	}
 
-	device_id = -1000;
+	if (instance==0) set_health_flags(subsystem_info_s::SUBSYSTEM_TYPE_ABSPRESSURE, exists, !optional, baro_valid, status);
 
-	// TODO: There is no baro calibration yet, since no external baros exist
-	// int ret = check_calibration(fd, "CAL_BARO%u_ID");
-
-	// if (ret) {
-	// 	mavlink_log_critical(mavlink_log_pub, "PREFLIGHT FAIL: BARO #%u UNCALIBRATED", instance);
-	// 	success = false;
-	// 	goto out;
-	// }
-
-//out:
-	set_health_flags(subsystem_info_s::SUBSYSTEM_TYPE_ABSPRESSURE, true, !optional, success, status);
-	DevMgr::releaseHandle(h);
-	return success;
+	return baro_valid;
 }
 
 static bool airspeedCheck(orb_advert_t *mavlink_log_pub, vehicle_status_s &status, bool optional, bool report_fail, bool prearm)

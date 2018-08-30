@@ -148,6 +148,8 @@ public:
 	 */
 	DeviceBusType get_device_bus_type() const { return _device_id.devid_s.bus_type; }
 
+	static const char *get_device_bus_string(DeviceBusType bus);
+
 	/**
 	 * Return the bus address of the device.
 	 *
@@ -184,31 +186,24 @@ public:
 		uint32_t devid;
 	};
 
+	/**
+	 * Print decoded device id string to a buffer.
+	 *
+	 * @param buffer                        buffer to write to
+	 * @param length                        buffer length
+	 * @param id	                        The device id.
+	 * @param return                        number of bytes written
+	 */
+	static int device_id_print_buffer(char *buffer, int length, uint32_t id);
+
 protected:
 	union DeviceId	_device_id;             /**< device identifier information */
 
 	const char	*_name;			/**< driver name */
 	bool		_debug_enabled{false};		/**< if true, debug messages are printed */
 
-	Device(const char *name) : _name(name)
-	{
-		/* setup a default device ID. When bus_type is UNKNOWN the
-		   other fields are invalid */
-		_device_id.devid = 0;
-		_device_id.devid_s.bus_type = DeviceBusType_UNKNOWN;
-		_device_id.devid_s.bus = 0;
-		_device_id.devid_s.address = 0;
-		_device_id.devid_s.devtype = 0;
-	}
-
-	Device(DeviceBusType bus_type, uint8_t bus, uint8_t address, uint8_t devtype = 0)
-	{
-		_device_id.devid = 0;
-		_device_id.devid_s.bus_type = bus_type;
-		_device_id.devid_s.bus = bus;
-		_device_id.devid_s.address = address;
-		_device_id.devid_s.devtype = devtype;
-	}
+	Device(const char *name);
+	Device(DeviceBusType bus_type, uint8_t bus, uint8_t address, uint8_t devtype = 0);
 
 	// no copy, assignment, move, move assignment
 	Device(const Device &) = delete;

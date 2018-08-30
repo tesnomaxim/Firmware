@@ -48,6 +48,7 @@ endif()
 
 px4_add_library(drivers__device
 	CDev.cpp
+	Device.cpp
 	ringbuffer.cpp
 	integrator.cpp
 	${SRCS_PLATFORM}
